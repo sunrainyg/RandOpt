@@ -1,0 +1,12 @@
+**/__pycache__/**
+**/logs/**
+**/wandb/**
+**/logs*/**
+
+*data_base/
+
+ *.pyc
+ *.pth
+ *.pt
+ *.pkl
+ *.whl

@@ -1,0 +1,37 @@
+FROM vllm/vllm-openai:v0.11.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    wget \
+    software-properties-common \
+    build-essential \
+    python3-dev \
+    python3-setuptools \
+    make \
+    cmake \
+    ffmpeg \
+    libavcodec-dev \
+    libavfilter-dev \
+    libavformat-dev \
+    libavutil-dev \
+    python3-pip \
+    python3-venv \
+    git \
+    screen \
+    tmux \
+    htop \
+    zsh \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN wget -nv -O - https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh
+RUN pip install --no-cache-dir git+https://github.com/apple/ml-flextok.git
+RUN pip install --no-cache-dir git+https://github.com/openai/CLIP.git
+
+COPY RandOpt/ /workspace/RandOpt
+RUN cd /workspace/RandOpt && \
+    grep -vE "vllm|torch|numpy|transformers" requirements.txt > req_cleaned.txt && \
+    pip install --no-cache-dir -r req_cleaned.txt
+
+WORKDIR /users/your_username/
