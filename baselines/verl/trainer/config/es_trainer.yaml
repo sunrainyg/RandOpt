@@ -1,0 +1,108 @@
+# Evolution Strategy (ES) Trainer Configuration
+# This config follows the same structure as ppo_trainer.yaml for consistency
+
+defaults:
+  - _self_
+
+# ES Algorithm Configuration
+es:
+  # Core ES hyperparameters
+  sigma: 0.001  # Noise scale for weight perturbation
+  alpha: 0.0005  # Learning rate for ES update
+  population_size: 30  # Number of perturbations per iteration
+  num_engines: 4  # Number of parallel vLLM engines
+  num_iterations: 800  # Total training iterations
+  
+  # Model precision
+  precision: bfloat16  # float16, bfloat16, or float32
+  
+  # Generation settings
+  max_tokens: 1024
+  temperature: 0.0  # Use greedy decoding by default
+  
+  # Evaluation settings
+  eval_interval: 25  # Evaluate every N iterations (0 to disable)
+  eval_batch_size: 512
+  
+  # vLLM settings
+  gpu_memory_utilization: 0.9
+  worker_extension_cls: "verl.workers.rollout.vllm_rollout.es_worker_extension.WorkerExtension"
+  
+  # Random seed (null for random)
+  global_seed: 42
+  
+  # Verbose logging
+  verbose: false
+
+# Model Configuration
+model:
+  path: Qwen/Qwen2.5-3B-Instruct
+  trust_remote_code: false
+
+# Data Configuration
+data:
+  # Task type: countdown, gsm8k, math, math500, olympiadbench, or custom
+  # - countdown: Uses {numbers}/{target} prompts and <answer> tags
+  # - gsm8k: Uses {question} prompts and #### answer format
+  # - math: Uses {problem} prompts and \boxed{} format
+  # - math500: Uses verl parquet format with \boxed{} (no custom templates needed)
+  # - olympiadbench: Uses verl parquet format with \boxed{} (no custom templates needed)
+  task_type: countdown
+  
+  # Data files (JSON or Parquet format)
+  # For olympiadbench/math500: use parquet with prompt/reward_model/extra_info fields
+  train_files: data/countdown.json
+  val_files: data/countdown.json
+  
+  # Data limits
+  train_max_samples: 200  # Use -1 for all
+  val_max_samples: -1  # Evaluation uses samples after train_max_samples
+  
+  # Task-specific prompts (ONLY used by countdown/gsm8k/math tasks)
+  # These are IGNORED for math500/olympiadbench which use parquet prompt field directly
+  system_message: "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer."
+  user_template: "Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>."
+  response_prompt: "Let me solve this step by step.\n<think>"
+  
+  # Custom task configuration (for custom task type)
+  # Set these to actual paths when using task_type=custom
+  reward_fn_path: null
+  reward_fn_name: null
+  prompt_processor_path: null
+  prompt_processor_name: null
+
+# Trainer Configuration
+trainer:
+  # Logging
+  project_name: es-training
+  experiment_name: countdown-es
+  logger:
+    - tensorboard
+    # - wandb  # Uncomment to enable WandB
+  
+  # Directories
+  default_local_dir: /tmp/${oc.env:USER}/verl/es_checkpoints
+  default_hdfs_dir: null
+  
+  # Device settings
+  device: cuda
+  n_gpus_per_node: 4
+  nnodes: 1
+  
+  # Training iterations (alternative to es.num_iterations)
+  total_epochs: null  # If set, overrides es.num_iterations
+  
+  # Evaluation frequency (alternative to es.eval_interval)
+  test_freq: null  # If set, overrides es.eval_interval
+  
+  # Checkpoint settings
+  save_freq: 100  # Save checkpoint every N iterations (0 to disable)
+  
+  # Profiling
+  npu_profile:
+    enable: false
+
+# Ray Configuration
+ray_kwargs:
+  ray_init:
+    runtime_env: {}
