@@ -3,6 +3,7 @@
 
 [Yulu Gan](https://yulugan.com), [Phillip Isola](https://web.mit.edu/phillipi/)
 
+Starting with a 1D Experiment: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1SsBrfQ-iFKuGElWjTNiFoX4dtMaCzCGy?usp=sharing)
 
 
 ## Requirements
@@ -25,7 +26,7 @@ From the directory containing `RandOpt/`:
 
 ## Download Data
 
-Please follow the instruction [data/README.md](data/README.md)
+Please follow the instructions [data/README.md](data/README.md)
 
 ## Run RandOpt
 
@@ -40,4 +41,7 @@ From the `RandOpt` directory:
 
 
 ## Run Baselines
-Please follow the instruction [baselines/README.md](baselines/README.md)
+Please follow the instructions [baselines/README.md](baselines/README.md)
+
+## Use your own dataset
+Please follow the instructions [CUSTOM_DATASET_GUIDE.md](CUSTOM_DATASET_GUIDE.md)

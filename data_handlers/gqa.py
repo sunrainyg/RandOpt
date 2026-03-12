@@ -42,7 +42,7 @@ class GQAHandler(DatasetHandler):
     default_test_path = "data/gqa/testdev.parquet"
     default_max_tokens = 256
     # Flag: whether loaded data has images (set during load_data)
-    has_images = true
+    has_images = True
 
     # -------------------------------------------------------------------------
     # Data loading
