@@ -1,0 +1,27 @@
+# verl-native iterative RandOpt on GSM8K (single node). Reuses verl's
+# fsdp_sft_trainer + model_merger; only the outer loop lives in verl/main.py.
+model: Qwen/Qwen2.5-1.5B-Instruct
+dataset: gsm8k
+train_files: data/gsm8k/train.parquet     # verl gsm8k parquet
+output_dir: iterative_randopt_runs/verl_qwen15b_gsm8k
+
+rounds: 4
+num_generations: 16
+gen_temperature: 1.0
+n_canonical: 8
+keep_incorrect_frac: 0.0
+sft_from_base: true       # canonical ReST^EM: SFT the ORIGINAL base every round (more stable)
+cumulative: true
+max_train_questions: 7473
+max_tokens: 1024
+
+epochs: 2
+lr: 1.0e-4
+lora_rank: 192
+lora_alpha: 384
+train_batch_size: 1024
+
+num_gpus: 8
+vllm_tensor_parallel_size: 1
+vllm_gpu_memory_utilization: 0.75
+vllm_dtype: bfloat16

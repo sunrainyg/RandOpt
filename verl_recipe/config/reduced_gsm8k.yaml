@@ -1,0 +1,31 @@
+# Reduced verl-native iterative RandOpt on GSM8K (fast validation that the verl
+# path runs + improves accuracy). Not a full-scale reproduction.
+model: Qwen/Qwen2.5-1.5B-Instruct
+dataset: gsm8k
+train_files: data/gsm8k/train.parquet
+output_dir: iterative_randopt_runs/verl_reduced_gsm8k
+
+rounds: 2
+num_generations: 8
+gen_temperature: 1.0
+n_canonical: 8
+keep_incorrect_frac: 0.0
+sft_from_base: true
+cumulative: true
+max_train_questions: 1024
+max_tokens: 512
+
+epochs: 2
+lr: 1.0e-4
+# LoRA (matches the native recipe, rank 192 -> here 64 for a fast check). verl's
+# model_merger dumps the adapter to merged/lora_adapter with lora_alpha=0; main.py
+# then folds it back into merged/ so vLLM eval sees the trained weights.
+lora_rank: 64
+lora_alpha: 128
+train_batch_size: 256
+attn_implementation: sdpa   # container has no flash_attn; sdpa works everywhere
+
+num_gpus: 8
+vllm_tensor_parallel_size: 1
+vllm_gpu_memory_utilization: 0.6
+vllm_dtype: bfloat16

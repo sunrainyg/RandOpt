@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iterative-randopt"
+version = "0.1.0"
+description = "Iterative RandOpt: on-policy rejection-sampling self-training for LLMs, with TRL and verl drop-in adapters."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Yulu Gan" }]
+keywords = ["llm", "self-training", "rejection-sampling", "rest-em", "distillation", "trl", "verl", "gsm8k"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.6.0",
+    "numpy",
+    "vllm>=0.10.0",
+    "transformers",
+    "datasets",
+    "huggingface-hub",
+    "ray[default]>=2.0.0",
+    "peft",
+    "accelerate",
+    "pandas",
+    "pyarrow",
+    "tqdm",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+trl = ["trl>=0.12.0"]
+verl = ["verl"]
+dev = ["pytest"]
+
+[project.scripts]
+iter_randopt = "iterative_randopt.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sunrainyg/RandOpt"
+Repository = "https://github.com/sunrainyg/RandOpt"
+
+# The package files live flat at the repo root; map the import name
+# `iterative_randopt` onto "." so `import iterative_randopt` works after
+# `pip install [-e] .` while the source tree stays flat.
+[tool.setuptools]
+package-dir = { "iterative_randopt" = "." }
+packages = [
+    "iterative_randopt",
+    "iterative_randopt.data",
+    "iterative_randopt.rewards",
+    "iterative_randopt.stages",
+    "iterative_randopt.verl_recipe",
+]
+
+[tool.setuptools.package-data]
+iterative_randopt = ["configs/*.yaml", "verl_recipe/config/*.yaml", "README.md"]

@@ -1,0 +1,26 @@
+model: allenai/Olmo-3-7B-Instruct
+dataset: gsm8k
+output_dir: iterative_randopt_runs/olmo3_7b_gsm8k
+
+rounds: 4
+num_generations: 16
+gen_temperature: 1.0
+n_canonical: 8
+keep_incorrect_frac: 0.0
+sft_from_base: false
+cumulative: true
+max_train_questions: 7473
+max_tokens: 1024
+
+epochs: 2.0
+lr: 1.0e-4
+lora_rank: 192
+per_device_batch_size: 2
+grad_accum: 64
+precision: bfloat16
+seed: 42
+
+keep_best: true
+
+num_gpus: 8
+gpu_memory_utilization: 0.75

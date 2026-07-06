@@ -1,0 +1,23 @@
+# byte-compiled / caches
+**/__pycache__/**
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# build / packaging artifacts
+*.egg-info/
+build/
+dist/
+*.whl
+
+# run outputs / logs
+iterative_randopt_runs/
+**/logs/**
+**/logs*/**
+**/wandb/**
+
+# model weights / large binaries
+*.pth
+*.pt
+*.pkl
+*.safetensors
