@@ -5,12 +5,12 @@
 </p>
 
 **Iterative RandOpt** runs RandOpt in a loop: each round goes **random guessing → ensemble → distill**
-back into a single model, and the next round starts from that distilled model. Accuracy is always
-measured on the **single distilled model** — no ensemble at inference.
+back into a single model, and the next round starts from that distilled model. Accuracy is
+measured on the **single distilled model**.
 
 ### Pick your path
 
-- **Just want to run it**, nothing else installed → [1. Standalone](#1-standalone)
+- **Just want to run it**, nothing else installed → [1. new users](#1-new-user)
 - **Already using verl** → [2. verl users](#2-verl-users)
 - **Already using TRL** → [3. TRL users](#3-trl-users)
 
@@ -20,7 +20,7 @@ shadows the `verl`, and installed with `--no-deps` it won't touch your pinned
 
 ---
 
-## 1. Standalone
+## 1. new users
 
 You just want to use this repo on its own.
 
@@ -114,8 +114,10 @@ trainer.train()
 
 ## Tested versions
 
-The adapters shell into verl/TRL's **internal** interfaces, so they are version-sensitive: installing
-never breaks your env, but running an adapter needs a version that still exposes what it calls. Verified on:
+The adapters shell into verl/TRL's **internal** interfaces, so they are version-sensitive: Installing it won’t break your environment, 
+but running an adapter requires a version that still exposes the APIs it depends on. 
+
+Verified on:
 
 | component | verified version |
 |-----------|------------------|
