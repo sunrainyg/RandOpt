@@ -8,6 +8,8 @@
 back into a single model, and the next round starts from that distilled model. Accuracy is
 measured on the **single distilled model**.
 
+Blog: https://thickets.mit.edu/blogs/iter_randopt.html
+
 ### Pick your path
 
 - **Just want to run it**, nothing else installed → [1. new users](#1-new-user)
