@@ -17,7 +17,6 @@ import pandas as pd
 
 from .config import IterativeRandOptConfig
 
-# repo root / install root that makes `-m iterative_randopt...` importable.
 _PKG_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -30,12 +29,6 @@ def _run(cmd: List[str], extra_env: Optional[dict] = None) -> None:
     if extra_env:
         env.update(extra_env)
     subprocess.run(cmd, env=env, check=True)
-
-
-def _write_seeds(path: str, base_model: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump({"base_model_path": base_model, "top_k_models": []}, f)
 
 
 def _merge_cumulative(out_path: str, parquets: List[str]) -> str:
@@ -61,7 +54,7 @@ def run(cfg: IterativeRandOptConfig) -> List[dict]:
     devices = ",".join(str(i) for i in range(cfg.num_gpus))
     py = sys.executable
 
-    # 0. data prep (once).
+    # step 0: data prep.
     data_dir = os.path.join(root, "data", cfg.dataset)
     if cfg.dataset == "gsm8k":
         _run([py, "-m", "iterative_randopt.stages.prepare_gsm8k", "--local_save_dir", data_dir])
@@ -74,7 +67,7 @@ def run(cfg: IterativeRandOptConfig) -> List[dict]:
     cur_model = m0
     round_parquets: List[str] = []
     results: List[dict] = []
-    best: Optional[dict] = None   # {"round", "model", "score"} of the highest-scoring round
+    best: Optional[dict] = None
 
     for r in range(1, cfg.rounds + 1):
         print(f"\n{'#'*70}\n# iterative RandOpt ROUND {r}/{cfg.rounds}  (policy={cur_model})\n{'#'*70}",
@@ -82,25 +75,36 @@ def run(cfg: IterativeRandOptConfig) -> List[dict]:
         rdir = os.path.join(root, f"r{r}")
         ddir = os.path.join(rdir, "distill_data")
         seeds = os.path.join(rdir, "seeds.json")
-        _write_seeds(seeds, cur_model)
 
-        # 1. on-policy rollouts + rejection sampling (correct-only).
+
+        # step 1: weight-space search.
+        _run([py, "-m", "iterative_randopt.stages.search",
+              "--dataset", cfg.dataset, "--model_name", cur_model,
+              "--seeds_out", seeds, "--data_path", train_path,
+              "--num_engines", str(cfg.num_gpus), "--tp", "1",
+              "--cuda_devices", devices, "--max_tokens", str(cfg.max_tokens),
+              "--population", str(cfg.population), "--sigma", str(cfg.sigma),
+              "--top_k", str(cfg.top_k),
+              "--score_samples", str(cfg.search_score_samples),
+              "--global_seed", str(cfg.seed + r), "--include_base"])
+
+        # step 2: rollouts + rejection sampling.
         _run([py, "-m", "iterative_randopt.stages.gen",
               "--dataset", cfg.dataset, "--model_name", cur_model,
               "--seeds_file", seeds, "--data_path", train_path,
               "--num_engines", str(cfg.num_gpus), "--tp", "1",
               "--cuda_devices", devices, "--max_tokens", str(cfg.max_tokens),
               "--max_samples", str(cfg.max_train_questions),
+              "--max_models", str(cfg.top_k),
               "--n_canonical", str(cfg.n_canonical),
               "--gen_temperature", str(cfg.gen_temperature),
               "--gen_n_samples", str(cfg.num_generations),
               "--output_dir", ddir, "--run_name", f"{cfg.dataset}_distill",
-              "--on_policy", "--keep_incorrect_frac", str(cfg.keep_incorrect_frac),
               "--skip_teacher"])
+
         round_pq = os.path.join(ddir, f"{cfg.dataset}_distill", "kd", "train_kd.parquet")
         round_parquets.append(round_pq)
 
-        # 2. cumulative dedup across rounds.
         if cfg.cumulative and len(round_parquets) > 1:
             train_pq = _merge_cumulative(
                 os.path.join(ddir, f"{cfg.dataset}_distill", "kd", "train_cumulative.parquet"),
@@ -108,7 +112,7 @@ def run(cfg: IterativeRandOptConfig) -> List[dict]:
         else:
             train_pq = round_pq
 
-        # 3. SFT (hard CE, kd_alpha=1.0) from the ORIGINAL base each round.
+        # SFT
         sft_base = m0 if cfg.sft_from_base else cur_model
         merged = os.path.join(rdir, "model", "merged")
         _run(["torchrun", "--standalone", f"--nproc_per_node={cfg.num_gpus}",
@@ -121,9 +125,9 @@ def run(cfg: IterativeRandOptConfig) -> List[dict]:
               "--lora_dropout", str(cfg.lora_dropout),
               "--per_device_batch_size", str(cfg.per_device_batch_size),
               "--grad_accum", str(cfg.grad_accum), "--precision", cfg.precision,
-              "--seed", str(cfg.seed), "--kd_alpha", "1.0", "--ce_on_correct_only"])
+              "--seed", str(cfg.seed), "--kd_alpha", "1.0"])
 
-        # 4. eval greedy (single-model, temperature=0).
+        # Eval
         eval_json = os.path.join(rdir, f"distilled_r{r}.json")
         _run([py, "-m", "iterative_randopt.stages.eval",
               "--model", merged, "--dataset", cfg.dataset, "--tp", "1",
@@ -140,9 +144,6 @@ def run(cfg: IterativeRandOptConfig) -> List[dict]:
         if best is None or score > best["score"]:
             best = {"round": r, "model": merged, "score": score}
 
-        # r-1's model is no longer needed: from-base always trains from m0, and
-        # continual has already consumed it as this round's warm-start base.
-        # Never delete the current best round's checkpoint when keep_best is set.
         if r > 1:
             prev_model_dir = os.path.join(root, f"r{r-1}", "model")
             if not (cfg.keep_best and best and best["round"] == r - 1):
@@ -164,7 +165,7 @@ def run(cfg: IterativeRandOptConfig) -> List[dict]:
         try:
             os.symlink(best["model"], best_out)
         except OSError:
-            best_out = best["model"]  # symlink unsupported: just report the real dir
+            best_out = best["model"]
         print(f"[iter-randopt] best = round {best['round']} "
               f"(greedy={best['score']*100:.2f}%) -> {best_out}")
 

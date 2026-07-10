@@ -23,7 +23,13 @@ class IterativeRandOptConfig:
     max_train_questions: int = 7473  # full gsm8k train split
     max_tokens: int = 1024          # rollout / eval max new tokens
 
-    # ---- SFT hyper-parameters (hard CE on filtered traces) -------------------
+    # ---- weight-space search --------------------------------------------------
+    population: int = 30            # Gaussian perturbations
+    sigma: float = 1e-3            # perturbation scale  theta -> theta + sigma*noise(seed)
+    top_k: int = 8                 # keep the top-k highest-scoring perturbations to distill
+    search_score_samples: int = 256  # questions used to score each perturbed model
+
+    # ---- SFT hyper-parameters -------------------------------------------------
     epochs: float = 2.0
     lr: float = 1e-4
     warmup_ratio: float = 0.1
