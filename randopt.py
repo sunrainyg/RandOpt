@@ -22,6 +22,12 @@ from vllm import SamplingParams
 
 from data_handlers import get_dataset_handler, list_datasets
 from core import launch_engines, cleanup_engines
+from utils.perturbation_norms import (
+    SUPPORTED_PERTURBATION_METHODS,
+    load_mass_config,
+)
+from utils.experiment_logging import start_console_tee
+
 
 
 def parse_args():
@@ -45,6 +51,29 @@ def parse_args():
                         help="Override default max_tokens for dataset")
     parser.add_argument("--sigma_values", type=str, default="0.0001,0.0005,0.001,0.002,0.005,0.01",
                         help="Comma-separated sigma values")
+    parser.add_argument(
+        "--perturbation_method",
+        type=str,
+        choices=SUPPORTED_PERTURBATION_METHODS,
+        default="isotropic",
+        help="Weight-space perturbation normalization",
+    )
+    parser.add_argument(
+        "--mass_config",
+        type=str,
+        default=None,
+        help=(
+            "JSON object or JSON-file path with group masses for "
+            "embedding, attention, mlp, head, norm, and other"
+        ),
+    )
+    parser.add_argument(
+        "--power_iterations",
+        type=int,
+        default=8,
+        help="Power-iteration steps used to estimate matrix spectral norms",
+    )
+
     parser.add_argument("--population_size", type=int, default=30,
                         help="Total number of perturbations to evaluate")
     parser.add_argument("--top_k_ratios", type=str, default="0.01,0.05,0.1",
@@ -55,11 +84,12 @@ def parse_args():
                         help="Tensor parallel size per engine (use 2+ for 7B+ models)")
     parser.add_argument("--cuda_devices", type=str, default="0,1,2,3")
     parser.add_argument("--global_seed", type=int, default=42)
-    parser.add_argument("--experiment_dir", type=str, default="es-experiment")
+    parser.add_argument("--experiment_dir", type=str, default="logs")
     parser.add_argument("--resume_dir", type=str, default=None,
                         help="Resume from a previous run directory (skips sampling, goes directly to ensemble eval)")
     
     args = parser.parse_args()
+    args.mass_config = load_mass_config(args.mass_config)
     
     args.sigma_list = [float(s.strip()) for s in args.sigma_values.split(",")]
     ratios = [float(r.strip()) for r in args.top_k_ratios.split(",")]
@@ -158,13 +188,13 @@ def run_sampling(args, engines, handler, train_prompts, train_datas, sampling_pa
         seed_idx += batch_size
         
         # Evaluate batch
-        ray.get([engines[i].collective_rpc.remote("perturb_self_weights", args=(int(s), sig, False)) 
+        ray.get([engines[i].collective_rpc.remote("perturb_self_weights", args=(int(s), sig, False, args.perturbation_method, args.mass_config, args.power_iterations)) 
                  for i, (s, sig) in enumerate(batch)])
         
         outputs = ray.get([engines[i].generate.remote(train_prompts, sampling_params, use_tqdm=False) 
                           for i in range(len(batch))])
         
-        ray.get([engines[i].collective_rpc.remote("restore_self_weights", args=(int(s), sig, False)) 
+        ray.get([engines[i].collective_rpc.remote("restore_self_weights", args=(int(s), sig, False, args.perturbation_method, args.mass_config, args.power_iterations)) 
                  for i, (s, sig) in enumerate(batch)])
         
         # Process results
@@ -221,13 +251,13 @@ def run_ensemble_evaluation(args, engines, handler, test_prompts, test_datas, to
         if batch_idx % 10 == 0 or batch_idx == total_batches - 1:
             print(f"  Batch {batch_idx + 1}/{total_batches} ({len(batch_perturbs)} models)...", flush=True)
         
-        ray.get([engines[i].collective_rpc.remote("perturb_self_weights", args=(int(s), sig, False)) 
+        ray.get([engines[i].collective_rpc.remote("perturb_self_weights", args=(int(s), sig, False, args.perturbation_method, args.mass_config, args.power_iterations)) 
                  for i, (s, sig) in enumerate(batch_perturbs)])
         
         batch_outputs = ray.get([engines[i].generate.remote(test_prompts, sampling_params, use_tqdm=False) 
                                  for i in range(len(batch_perturbs))])
         
-        ray.get([engines[i].collective_rpc.remote("restore_self_weights", args=(int(s), sig, False)) 
+        ray.get([engines[i].collective_rpc.remote("restore_self_weights", args=(int(s), sig, False, args.perturbation_method, args.mass_config, args.power_iterations)) 
                  for i, (s, sig) in enumerate(batch_perturbs)])
         
         # Extract answers immediately and discard outputs to save memory
@@ -295,6 +325,9 @@ def save_results(args, logging_dir, model_saves_dir, base_model_path, handler,
     
     seeds_info = {
         "base_model_path": base_model_path,
+        "perturbation_method": args.perturbation_method,
+        "mass_config": args.mass_config,
+        "power_iterations": args.power_iterations,
         "best_sigma": best_sigma,
         "top_k_models": [
             {"rank": i+1, "seed": int(seed), "sigma": float(sigma), "train_reward": float(reward)}
@@ -318,6 +351,9 @@ def save_results(args, logging_dir, model_saves_dir, base_model_path, handler,
     results = {
         "dataset": args.dataset,
         "model": args.model_name,
+        "perturbation_method": args.perturbation_method,
+        "mass_config": args.mass_config,
+        "power_iterations": args.power_iterations,
         "train_samples": args.train_samples,
         "test_samples": args.test_samples,
         "base_train_reward": base_train_reward,
@@ -345,6 +381,8 @@ def main(args):
     print(f"ES Ensemble - {handler.name.upper()} {'[RESUME]' if is_resume else ''}")
     print(f"{'='*60}")
     print(f"Model: {args.model_name}")
+    print(f"Perturbation: {args.perturbation_method} | "
+          f"Power iterations: {args.power_iterations}")
     print(f"Population: {args.population_size} | Top-K: {args.top_k_list} | Engines: {args.num_engines} | TP: {args.tp}")
     
     # Ray setup
@@ -359,6 +397,9 @@ def main(args):
             saved = json.load(f)
         base_model_path = saved["base_model_path"]
         best_sigma = saved["best_sigma"]
+        args.perturbation_method = saved.get("perturbation_method", args.perturbation_method)
+        args.mass_config = saved.get("mass_config", args.mass_config)
+        args.power_iterations = saved.get("power_iterations", args.power_iterations)
         top_k_perturbs = [(m["seed"], m["sigma"]) for m in saved["top_k_models"]]
         top_k_rewards = [m["train_reward"] for m in saved["top_k_models"]]
         
@@ -369,18 +410,20 @@ def main(args):
         base_test_accuracy = prev_results["base_test_accuracy"]
         perf = {(s, sig): r for (s, sig), r in zip(top_k_perturbs, top_k_rewards)}
         
-        logging_dir = f"{args.experiment_dir}/{args.dataset}_resume_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        logging_dir = f"{args.experiment_dir}/{args.dataset}_{args.perturbation_method}_resume_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         model_saves_dir = f"{logging_dir}/model_saves"
         os.makedirs(model_saves_dir, exist_ok=True)
+        start_console_tee(logging_dir)
         
         print(f"Resumed from: {args.resume_dir}")
         print(f"Base model: {base_model_path}")
         print(f"Loaded {len(top_k_perturbs)} perturbations")
     else:
         # Training mode: setup directories and save model
-        logging_dir = f"{args.experiment_dir}/{args.dataset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        logging_dir = f"{args.experiment_dir}/{args.dataset}_{args.perturbation_method}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         model_saves_dir = f"{logging_dir}/model_saves"
         os.makedirs(model_saves_dir, exist_ok=True)
+        start_console_tee(logging_dir)
     
     with open(f"{logging_dir}/args.json", "w") as f:
         json.dump(vars(args), f, indent=4)

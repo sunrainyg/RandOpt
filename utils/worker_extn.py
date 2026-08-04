@@ -5,6 +5,25 @@ import numpy as np
 import torch
 import os
 import inspect
+
+try:
+    from utils.perturbation_norms import (
+        SUPPORTED_PERTURBATION_METHODS,
+        build_modular_scales,
+        load_mass_config,
+        natural_norm,
+        normalization_denominator,
+    )
+except ImportError:
+    # Fallback when worker_extn.py is loaded with utils/ directly on sys.path.
+    from perturbation_norms import (
+        SUPPORTED_PERTURBATION_METHODS,
+        build_modular_scales,
+        load_mass_config,
+        natural_norm,
+        normalization_denominator,
+    )
+
 try:
     from vllm.forward_context import set_forward_context
 except ImportError:
@@ -66,38 +85,178 @@ class WorkerExtension:
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    def perturb_self_weights(self, seed, noise_scale, negate=False):
-        self._set_seed(seed)
-        scale = float(noise_scale)
-        sign = -1.0 if negate else 1.0
-        for name, p in self.model_runner.model.named_parameters():
-            gen = torch.Generator(device=p.device)
-            gen.manual_seed(int(seed))
-            noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-            if self._should_perturb(name):
-                p.data.add_(sign * scale * noise)
+    def _named_perturbable_parameters(self):
+        return [
+            (name, param)
+            for name, param in self.model_runner.model.named_parameters()
+            if self._should_perturb(name)
+        ]
+
+    @staticmethod
+    def _sample_parameter_noise(param, seed):
+        """Match the original RandOpt noise stream exactly."""
+        generator = torch.Generator(device=param.device)
+        generator.manual_seed(int(seed))
+        return torch.randn(
+            param.shape,
+            dtype=param.dtype,
+            device=param.device,
+            generator=generator,
+        )
+
+    def _get_modular_scales(self, named_parameters, mass_config):
+        config = load_mass_config(mass_config)
+        cache_key = tuple(sorted(config.items()))
+        cache = getattr(self, "_modular_scale_cache", {})
+        if cache_key not in cache:
+            cache[cache_key] = build_modular_scales(
+                named_parameters,
+                mass_config=config,
+            )
+            self._modular_scale_cache = cache
+        return cache[cache_key]
+
+    def _compute_modular_radial_denominator(
+        self,
+        named_parameters,
+        seed,
+        modular_scales,
+        power_iterations,
+    ):
+        global_denominator = 0.0
+        for name, param in named_parameters:
+            modular_scale = modular_scales[name]
+            if modular_scale == float("inf"):
+                continue
+            noise = self._sample_parameter_noise(param, seed)
+            local_denominator = modular_scale * natural_norm(
+                name,
+                noise,
+                power_iterations=power_iterations,
+            )
+            global_denominator = max(global_denominator, local_denominator)
             del noise
+
+        if global_denominator <= 0.0:
+            raise RuntimeError(
+                "Could not compute a positive modular-radial denominator. "
+                "Check mass_config and perturbable parameters."
+            )
+        return global_denominator
+
+    def _apply_weight_perturbation(
+        self,
+        seed,
+        radius,
+        negate=False,
+        method="isotropic",
+        mass_config=None,
+        power_iterations=8,
+        restore=False,
+    ):
+        self._set_seed(seed)
+
+        method = str(method)
+        if method not in SUPPORTED_PERTURBATION_METHODS:
+            raise ValueError(
+                f"Unknown perturbation method '{method}'. "
+                f"Choose from {SUPPORTED_PERTURBATION_METHODS}."
+            )
+
+        radius = float(radius)
+        if not np.isfinite(radius) or radius < 0.0:
+            raise ValueError("radius must be finite and non-negative")
+        if int(power_iterations) < 1:
+            raise ValueError("power_iterations must be at least 1")
+
+        named_parameters = self._named_perturbable_parameters()
+        modular_scales = None
+        global_radial_denominator = None
+
+        if method in {"modular_shell", "modular_radial"}:
+            modular_scales = self._get_modular_scales(
+                named_parameters,
+                mass_config,
+            )
+
+        if method == "modular_radial":
+            global_radial_denominator = self._compute_modular_radial_denominator(
+                named_parameters=named_parameters,
+                seed=seed,
+                modular_scales=modular_scales,
+                power_iterations=int(power_iterations),
+            )
+
+        perturb_sign = -1.0 if negate else 1.0
+        if restore:
+            perturb_sign *= -1.0
+
+        with torch.no_grad():
+            for name, param in named_parameters:
+                noise = self._sample_parameter_noise(param, seed)
+                modular_scale = (
+                    modular_scales[name] if modular_scales is not None else 1.0
+                )
+                denominator = normalization_denominator(
+                    method=method,
+                    name=name,
+                    noise=noise,
+                    modular_scale=modular_scale,
+                    global_radial_denominator=global_radial_denominator,
+                    power_iterations=int(power_iterations),
+                )
+
+                # Zero-mass modular groups have denominator = infinity and are
+                # intentionally frozen for modular perturbations.
+                if denominator != float("inf"):
+                    alpha = perturb_sign * radius / denominator
+                    param.data.add_(noise, alpha=float(alpha))
+                del noise
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
         return True
 
-    def restore_self_weights(self, seed, SIGMA, negate=False):
-        """Undo perturbation. Must use same negate value as perturb_self_weights."""
-        self._set_seed(seed)
-        sign = -1.0 if negate else 1.0  # Same sign as perturb
-        for name, p in self.model_runner.model.named_parameters():
-            gen = torch.Generator(device=p.device)
-            gen.manual_seed(int(seed))
-            noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-            if self._should_perturb(name):
-                # Undo: subtract what we added (sign * sigma * noise)
-                p.data.add_(-sign * float(SIGMA) * noise)
-            del noise
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        return True
+    def perturb_self_weights(
+        self,
+        seed,
+        radius,
+        negate=False,
+        method="isotropic",
+        mass_config=None,
+        power_iterations=8,
+    ):
+        """Apply one of the supported random perturbation methods."""
+        return self._apply_weight_perturbation(
+            seed=seed,
+            radius=radius,
+            negate=negate,
+            method=method,
+            mass_config=mass_config,
+            power_iterations=power_iterations,
+            restore=False,
+        )
+
+    def restore_self_weights(
+        self,
+        seed,
+        radius,
+        negate=False,
+        method="isotropic",
+        mass_config=None,
+        power_iterations=8,
+    ):
+        """Undo a perturbation using the identical seed and normalization."""
+        return self._apply_weight_perturbation(
+            seed=seed,
+            radius=radius,
+            negate=negate,
+            method=method,
+            mass_config=mass_config,
+            power_iterations=power_iterations,
+            restore=True,
+        )
 
     def update_weights_from_seeds(self, seeds, coeffs, alpha, population_size):
         """
@@ -221,27 +380,28 @@ class WorkerExtension:
             torch.cuda.synchronize()
         return True
     
-    def apply_perturbation(self, seed, sigma):
-        """Apply perturbation from base weights (not current weights)."""
-        if not hasattr(self, '_base_weights'):
+    def apply_perturbation(
+        self,
+        seed,
+        radius,
+        method="isotropic",
+        mass_config=None,
+        power_iterations=8,
+    ):
+        """Apply a perturbation from stored base weights."""
+        if not hasattr(self, "_base_weights"):
             raise RuntimeError("Must call store_base_weights first")
-        
-        self._set_seed(seed)
-        for name, p in self.model_runner.model.named_parameters():
-            # Restore base weights first
-            p.data.copy_(self._base_weights[name])
-            # Then apply perturbation (skip visual encoder)
-            gen = torch.Generator(device=p.device)
-            gen.manual_seed(int(seed))
-            noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-            if self._should_perturb(name):
-                p.data.add_(float(sigma) * noise)
-            del noise
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        return True
-    
+        for name, param in self.model_runner.model.named_parameters():
+            param.data.copy_(self._base_weights[name])
+        return self.perturb_self_weights(
+            seed=seed,
+            radius=radius,
+            negate=False,
+            method=method,
+            mass_config=mass_config,
+            power_iterations=power_iterations,
+        )
+
     def reset_to_base_weights(self):
         """Reset model weights to stored base weights."""
         if not hasattr(self, '_base_weights'):

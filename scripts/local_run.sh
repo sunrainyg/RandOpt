@@ -3,8 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-CUDA_DEVICES="${CUDA_DEVICES:-0,1,2,3}"
-MODEL="allenai/Olmo-3-7B-Instruct"
+CUDA_DEVICES="${CUDA_DEVICES:-0}"
+MODEL="Qwen/Qwen2.5-0.5B-Instruct"
 DATASET="countdown"
 TRAIN_DATA_PATH="data/countdown/countdown.json"
 TEST_DATA_PATH="data/countdown/countdown.json"
@@ -25,12 +25,12 @@ python3 randopt.py \
   --model_name "$MODEL" \
   --num_engines "$NUM_ENGINES" \
   --tp "$TP" \
-  --train_samples 200 \
+  --train_samples 50 \ 
   --precision bfloat16 \
-  --population_size 5000 \
-  --top_k_ratios "0.04,0.01,0.05,0.1" \
+  --population_size 32 \
+  --top_k_ratios "0.1,0.2" \
   --sigma_values "0.0005,0.001,0.002" \
-  --max_tokens 1024 \
+  --max_tokens 512 \
   --global_seed 42 \
   --experiment_dir "randopt-experiment-local" \
   --cuda_devices "$CUDA_DEVICES"

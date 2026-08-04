@@ -4,9 +4,13 @@
 **/logs*/**
 
 *data_base/
+data/*
+
+__MACOSX
 
  *.pyc
  *.pth
  *.pt
  *.pkl
  *.whl
+logs/
