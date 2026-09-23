@@ -53,6 +53,39 @@ Then, from the `RandOpt` directory:
 ## Distill top-k models into a single model
 Please follow the instructions in [distillation/README.md](distillation/README.md).
 
+## Serve many seeds at once as LoRA adapters
+
+`scripts/make_seed_lora.py` materialises each seed as a PEFT LoRA adapter
+instead of perturbing the full weights in place. A stock `vllm serve` can then
+hold all seeds simultaneously and a client picks one per request through the
+OpenAI `model` field, so no weight swapping happens between requests.
+
+```bash
+python3 scripts/make_seed_lora.py \
+  --model Qwen/Qwen2.5-32B-Instruct --num_seeds 20 \
+  --output_dir ./seed_loras --rank 16 --noise_scale 0.001
+
+vllm serve Qwen/Qwen2.5-32B-Instruct --enable-lora --max-loras 20 --max-lora-rank 16 \
+  --lora-modules $(for i in $(seq 0 19); do printf 'seed%d=./seed_loras/seed%d ' $i $i; done)
+
+curl localhost:8000/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model": "seed7", "messages": [{"role": "user", "content": "..."}]}'
+```
+
+Only `config.json` is read, so generation runs on CPU in seconds. For each
+targeted linear layer the two LoRA factors are drawn from `torch.randn` seeded
+with the seed and scaled so the applied delta has per-element std
+`noise_scale`, the counterpart of the full-matrix `sigma`. The same
+`(model, seed, rank, alpha, noise_scale)` reproduces the same adapter.
+
+**This is not equivalent to full-matrix RandOpt.** A rank-`r` delta with the
+same per-element std concentrates its energy in `r` directions, so its
+operator norm is about `sqrt(d / r)` larger than dense noise of the same std.
+Start from a sigma at or below your dense setting and tune from there.
+
+Results on facts-search and Countdown, compared with full-matrix perturbation
+and temperature sampling, are in [analysis/seed_lora](analysis/seed_lora/README.md).
+
 ## Run Baselines
 Please follow the instructions in [baselines/README.md](baselines/README.md)
 
