@@ -63,9 +63,9 @@ OpenAI `model` field, so no weight swapping happens between requests.
 ```bash
 python3 scripts/make_seed_lora.py \
   --model Qwen/Qwen2.5-32B-Instruct --num_seeds 20 \
-  --output_dir ./seed_loras --rank 1 --noise_scale 0.001
+  --output_dir ./seed_loras --rank 16 --noise_scale 0.001
 
-vllm serve Qwen/Qwen2.5-32B-Instruct --enable-lora --max-loras 20 --max-lora-rank 1 \
+vllm serve Qwen/Qwen2.5-32B-Instruct --enable-lora --max-loras 20 --max-lora-rank 16 \
   --lora-modules $(for i in $(seq 0 19); do printf 'seed%d=./seed_loras/seed%d ' $i $i; done)
 
 curl localhost:8000/v1/chat/completions -H 'content-type: application/json' \
@@ -81,11 +81,43 @@ with the seed and scaled so the applied delta has per-element std
 **This is not equivalent to full-matrix RandOpt.** A rank-`r` delta with the
 same per-element std concentrates its energy in `r` directions, so its
 operator norm is about `sqrt(d / r)` larger than dense noise of the same std.
-In our runs, Qwen2.5-32B-Instruct at `noise_scale=0.01`, rank 16 degenerated
-on Countdown while dense perturbation at the same sigma did not; at
-`noise_scale=0.001` on a multi-hop retrieval task the seed LoRAs matched dense
-seeds on per-seed accuracy and coverage. Start from a sigma an order of
-magnitude below your dense setting and tune from there.
+Start from a sigma at or below your dense setting and tune from there.
+
+### Results
+
+Qwen2.5-32B-Instruct, greedy decoding, rank 16 / alpha 16 adapters on all
+attention and MLP projections. Coverage is the fraction of test examples solved
+by at least one seed.
+
+**Facts-search** (multi-hop retrieval agent, 200 test examples, seeds ranked on
+a disjoint 200-example train split):
+
+| Setting | Seeds | Per-seed mean | Best seed | Coverage |
+|---|---|---|---|---|
+| Base model, T=1.0 samples | 20 | 0.436 | 0.50 | 0.50 |
+| Full-matrix perturbation, sigma 0.001 | 18 | 0.429 | 0.445 | 0.63 |
+| Seed LoRAs, `noise_scale=0.001` | 10 | 0.45 | 0.495 | 0.66 |
+
+Seed LoRAs kept per-seed accuracy at the base model's level and matched the
+diversity of full-matrix perturbation with fewer seeds.
+
+**Countdown** (arithmetic puzzle, 20 test examples, seeds ranked on 80 train
+examples):
+
+| Setting | Seeds | Per-seed mean | Coverage | Majority vote |
+|---|---|---|---|---|
+| Base model, T=0.6 samples | 10 | 0.49 | 0.90 | 0.70 |
+| Full-matrix perturbation, sigma 0.001, top-10 of 100 | 10 | 0.525 | 0.80 | 0.75 |
+| Seed LoRAs, `noise_scale=0.01` | 6 | degenerate | - | - |
+| Seed LoRAs, `noise_scale=0.001` | 6 | coherent, low diversity | - | - |
+
+At `noise_scale=0.01` five or six of the six seed LoRAs produced repetitive,
+non-terminating output on Countdown prompts, so no accuracy is reported. At
+`noise_scale=0.001` every seed was coherent, but seeds differed only modestly
+from each other and we did not run the full evaluation. On a reasoning task
+like Countdown the low-rank concentration bites harder than on the agentic
+facts-search task, so treat the LoRA path as a serving convenience whose sigma
+must be re-tuned per task, not as a drop-in replacement for full-matrix seeds.
 
 ## Run Baselines
 Please follow the instructions in [baselines/README.md](baselines/README.md)
