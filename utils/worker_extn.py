@@ -10,6 +10,13 @@ try:
 except ImportError:
     set_forward_context = None
 
+try:
+    # vLLM >= ~0.15 (nightly) moved get_ip into network_utils
+    from vllm.utils.network_utils import get_ip
+except ImportError:
+    # vLLM <= 0.14.x
+    from vllm.utils import get_ip
+
 def _stateless_init_process_group(master_address, master_port, rank, world_size, device):
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
@@ -46,14 +53,26 @@ class WorkerExtension:
     # Prefixes of visual encoder parameters to skip during perturbation (for VL models)
     _VISUAL_PREFIXES = ("visual.", "model.visual.")
 
+    # Substrings identifying FP8 quantization scale parameters. These are tiny
+    # float32 tensors that scale whole weight blocks; additive Gaussian noise is a
+    # huge *relative* perturbation on them and corrupts the model at any usable
+    # sigma (while the FP8 weights themselves round small noise away). Never
+    # perturb them. Set PERTURB_SCALES=1 to override (not recommended).
+    _SCALE_MARKERS = ("scale_inv", "weight_scale", "input_scale", "act_scale", ".scale")
+
+    def _is_scale_param(self, name: str) -> bool:
+        return any(marker in name for marker in self._SCALE_MARKERS)
+
     def _should_perturb(self, name: str) -> bool:
         """Check if a parameter should be perturbed.
-        
-        By default, skips visual encoder params for VL models.
-        Set env PERTURB_VISUAL=1 to also perturb visual encoder.
+
+        Skips visual encoder params for VL models (PERTURB_VISUAL=1 to include),
+        and FP8 quantization scale params (PERTURB_SCALES=1 to include).
         """
+        if os.environ.get("PERTURB_SCALES", "0") != "1" and self._is_scale_param(name):
+            return False
         if os.environ.get("PERTURB_VISUAL", "0") == "1":
-            return True  # Perturb ALL parameters including visual encoder
+            return True  # Perturb ALL remaining parameters including visual encoder
         return not name.startswith(self._VISUAL_PREFIXES)
 
     def _set_seed(self, seed):
@@ -66,16 +85,36 @@ class WorkerExtension:
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
+    @staticmethod
+    def _seeded_noise(p, seed):
+        """Standard-normal noise with p's shape, reproducible from (seed, shape).
+
+        Always float32: FP8 dtypes have no randn kernel, and low-precision
+        dtypes would otherwise round the noise before it is scaled.
+        """
+        gen = torch.Generator(device=p.device)
+        gen.manual_seed(int(seed))
+        return torch.randn(p.shape, dtype=torch.float32, device=p.device, generator=gen)
+
+    @staticmethod
+    def _add_to_param(p, delta_fp32):
+        """p += delta, computed in float32 and written back in place.
+
+        copy_ keeps the parameter's storage (NCCL broadcast and CUDA graphs hold
+        pointers to it) and works for dtypes without an add kernel, e.g. FP8.
+        """
+        p.data.copy_(p.data.float() + delta_fp32)
+
     def perturb_self_weights(self, seed, noise_scale, negate=False):
+        """W += sign * noise_scale * N(0, 1), one fresh generator per parameter."""
         self._set_seed(seed)
         scale = float(noise_scale)
         sign = -1.0 if negate else 1.0
         for name, p in self.model_runner.model.named_parameters():
-            gen = torch.Generator(device=p.device)
-            gen.manual_seed(int(seed))
-            noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-            if self._should_perturb(name):
-                p.data.add_(sign * scale * noise)
+            if not self._should_perturb(name):
+                continue
+            noise = self._seeded_noise(p, seed)
+            self._add_to_param(p, sign * scale * noise)
             del noise
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -87,12 +126,11 @@ class WorkerExtension:
         self._set_seed(seed)
         sign = -1.0 if negate else 1.0  # Same sign as perturb
         for name, p in self.model_runner.model.named_parameters():
-            gen = torch.Generator(device=p.device)
-            gen.manual_seed(int(seed))
-            noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-            if self._should_perturb(name):
-                # Undo: subtract what we added (sign * sigma * noise)
-                p.data.add_(-sign * float(SIGMA) * noise)
+            if not self._should_perturb(name):
+                continue
+            noise = self._seeded_noise(p, seed)
+            # Undo: subtract what we added (sign * sigma * noise)
+            self._add_to_param(p, -sign * float(SIGMA) * noise)
             del noise
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -119,16 +157,7 @@ class WorkerExtension:
             
             for i, seed in enumerate(seeds):
                 self._set_seed(seed)
-                gen = torch.Generator(device=p.device)
-                gen.manual_seed(int(seed))
-                
-                # Generate noise (in native precision, usually float16/bfloat16)
-                noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-                
-                # FIXED: Convert noise to float32 BEFORE multiplication.
-                # Use in-place operation to avoid extra memory allocation
-                noise_fp32 = noise.to(torch.float32)
-                del noise  # Free original noise immediately
+                noise_fp32 = self._seeded_noise(p, seed)
                 
                 # Scale in-place and accumulate
                 noise_fp32.mul_(coeffs[i])
@@ -140,8 +169,7 @@ class WorkerExtension:
             # div by population_size multiply by alpha (scalar)
             update_accumulator.div_(population_size)
             update_accumulator.mul_(alpha)
-            # Apply final update to weight (cast back to model dtype at the very end)
-            p.data.add_(update_accumulator.to(p.dtype))
+            self._add_to_param(p, update_accumulator)
             
             del update_accumulator
             param_count += 1
@@ -158,7 +186,6 @@ class WorkerExtension:
 
     def get_worker_ip(self):
         """Return the IP address of this worker's node."""
-        from vllm.utils import get_ip
         return get_ip()
 
     def init_inter_engine_group(self, master_address: str, master_port: int, rank: int, world_size: int):
@@ -193,9 +220,7 @@ class WorkerExtension:
         os.makedirs(out_dir, exist_ok=True)
         noise_state = {}
         for name, p in self.model_runner.model.named_parameters():
-            gen = torch.Generator(device=p.device)
-            gen.manual_seed(int(seed))
-            noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
+            noise = self._seeded_noise(p, seed)
             noise_state[name] = noise.detach().cpu()
             del noise
         torch.save(noise_state, os.path.join(out_dir, f"noise_seed_{int(seed)}.pt"))
@@ -230,12 +255,10 @@ class WorkerExtension:
         for name, p in self.model_runner.model.named_parameters():
             # Restore base weights first
             p.data.copy_(self._base_weights[name])
-            # Then apply perturbation (skip visual encoder)
-            gen = torch.Generator(device=p.device)
-            gen.manual_seed(int(seed))
-            noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-            if self._should_perturb(name):
-                p.data.add_(float(sigma) * noise)
+            if not self._should_perturb(name):
+                continue
+            noise = self._seeded_noise(p, seed)
+            self._add_to_param(p, float(sigma) * noise)
             del noise
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -293,20 +316,13 @@ class WorkerExtension:
                 perturbation = torch.zeros_like(p.data, dtype=torch.float32)
                 
                 for (seed, sigma), weight in zip(seeds_sigmas, weights):
-                    gen = torch.Generator(device=p.device)
-                    gen.manual_seed(int(seed))
-                    noise = torch.randn(p.shape, dtype=p.dtype, device=p.device, generator=gen)
-                    
-                    # Convert to float32 and scale in-place
-                    noise_fp32 = noise.to(torch.float32)
-                    del noise  # Free original noise immediately
-                    
+                    noise_fp32 = self._seeded_noise(p, seed)
                     noise_fp32.mul_(weight * float(sigma))
                     perturbation.add_(noise_fp32)
                     del noise_fp32  # Clean up immediately
                 
                 # Apply averaged perturbation
-                p.data.add_(perturbation.to(p.dtype))
+                self._add_to_param(p, perturbation)
                 del perturbation
             
             param_count += 1
